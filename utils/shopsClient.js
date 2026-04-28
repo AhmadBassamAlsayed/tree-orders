@@ -36,7 +36,10 @@ const getProduct = (productId) =>
 const getShop = (shopId) =>
   internalFetch(`/api/internal/shops/${shopId}`);
 
+const getOpenSubCartByShop = (userId, shopId) =>
+  internalFetch(`/api/internal/sub-carts/by-shop?userId=${userId}&shopId=${shopId}`);
+
 const checkoutSubCart = (subCartId) =>
   internalFetch(`/api/internal/sub-carts/${subCartId}/checkout`, { method: 'PATCH' });
 
-module.exports = { getCart, getSubCart, getProduct, getShop, checkoutSubCart };
+module.exports = { getCart, getSubCart, getOpenSubCartByShop, getProduct, getShop, checkoutSubCart };

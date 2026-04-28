@@ -4,12 +4,12 @@ const shopsClient = require('../utils/shopsClient');
 const financialClient = require('../utils/financialClient');
 
 const checkout = async (req, res) => {
-  const { cartId, subCartId, addressId } = req.body;
+  const { cartId, shopId, addressId } = req.body;
   const customerId = req.userId;
 
   // STEP 1 — validate input
-  if ((!cartId && !subCartId) || (cartId && subCartId)) {
-    return res.status(400).json({ error: 'MISSING_CHECKOUT_TARGET', message: 'Provide either cartId or subCartId, not both' });
+  if ((!cartId && !shopId) || (cartId && shopId)) {
+    return res.status(400).json({ error: 'MISSING_CHECKOUT_TARGET', message: 'Provide either cartId or shopId, not both' });
   }
 
   try {
@@ -17,12 +17,11 @@ const checkout = async (req, res) => {
     let subCarts = [];
     let resolvedCartId;
 
-    if (subCartId) {
-      const { ok, status, body } = await shopsClient.getSubCart(subCartId);
-      if (status === 404) return res.status(404).json({ error: 'SUBCART_NOT_FOUND' });
+    if (shopId) {
+      const { ok, status, body } = await shopsClient.getOpenSubCartByShop(customerId, shopId);
+      if (status === 404) return res.status(404).json({ error: 'SUBCART_NOT_FOUND', message: 'No open subcart found for this shop' });
       if (!ok) return res.status(502).json({ error: 'SHOPS_SERVICE_ERROR' });
       if (body.customerId !== customerId) return res.status(403).json({ error: 'FORBIDDEN' });
-      if (body.status !== 'open') return res.status(409).json({ error: 'SUBCART_NOT_OPEN', message: 'SubCart is already checked out' });
       subCarts = [body];
       resolvedCartId = body.cartId;
     } else {
@@ -162,7 +161,11 @@ const checkout = async (req, res) => {
 
     // STEP 11 — mark subcarts as checked out in tree-shops
     for (const { subCart } of subCartData) {
-      await shopsClient.checkoutSubCart(subCart.id).catch(() => {});
+      const checkoutRes = await shopsClient.checkoutSubCart(subCart.id).catch(() => null);
+      // partial checkout: subcart was moved to a new isolated cart — update order reference
+      if (checkoutRes?.ok && checkoutRes.body?.cartId && checkoutRes.body.cartId !== resolvedCartId) {
+        await order.update({ cartId: checkoutRes.body.cartId }).catch(() => {});
+      }
     }
 
     // STEP 12 — respond
