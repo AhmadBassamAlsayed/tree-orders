@@ -9,7 +9,7 @@ const SubOrderStatusLog = sequelize.define('SubOrderStatusLog', {
   changedBy: { type: DataTypes.BIGINT.UNSIGNED, allowNull: false, field: 'changed_by' },
   changedByRole: { type: DataTypes.STRING(30), allowNull: false, field: 'changed_by_role' },
   notes: { type: DataTypes.TEXT, allowNull: true },
-  createdAt: { type: DataTypes.DATE, allowNull: false, field: 'created_at' }
+  createdAt: { type: DataTypes.DATE, allowNull: false, field: 'created_at', defaultValue: () => new Date() }
 }, {
   tableName: 'sub_order_status_logs',
   timestamps: false,

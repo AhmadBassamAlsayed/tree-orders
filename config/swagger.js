@@ -1,5 +1,9 @@
 const swaggerJsdoc = require('swagger-jsdoc');
 
+const PORT = process.env.PORT || 3005;
+const HOST = process.env.SWAGGER_HOST || 'localhost';
+const PROTOCOL = process.env.SWAGGER_PROTOCOL || 'http';
+
 const options = {
   definition: {
     openapi: '3.0.0',
@@ -8,7 +12,7 @@ const options = {
       version: '1.0.0',
       description: 'Orders & logistics service for the Tree platform.'
     },
-    servers: [{ url: 'http://localhost:3004', description: 'Development' }],
+    servers: [{ url: `${PROTOCOL}://${HOST}:${PORT}`, description: 'Tree Orders service' }],
     components: {
       securitySchemes: {
         bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
