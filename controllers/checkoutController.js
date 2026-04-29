@@ -13,13 +13,14 @@ const checkout = async (req, res) => {
   }
 
   try {
-    // STEP 2 — load & validate subcart(s)
+    // STEP 2 — load subcart(s); internal endpoint validates products/categories/shops in 3 queries
     let subCarts = [];
     let resolvedCartId;
 
     if (shopId) {
       const { ok, status, body } = await shopsClient.getOpenSubCartByShop(customerId, shopId);
       if (status === 404) return res.status(404).json({ error: 'SUBCART_NOT_FOUND', message: 'No open subcart found for this shop' });
+      if (status === 422) return res.status(422).json(body);
       if (!ok) return res.status(502).json({ error: 'SHOPS_SERVICE_ERROR' });
       if (body.customerId !== customerId) return res.status(403).json({ error: 'FORBIDDEN' });
       subCarts = [body];
@@ -27,6 +28,7 @@ const checkout = async (req, res) => {
     } else {
       const { ok, status, body } = await shopsClient.getCart(cartId);
       if (status === 404) return res.status(404).json({ error: 'CART_NOT_FOUND' });
+      if (status === 422) return res.status(422).json(body);
       if (!ok) return res.status(502).json({ error: 'SHOPS_SERVICE_ERROR' });
       if (body.customerId !== customerId) return res.status(403).json({ error: 'FORBIDDEN' });
       if (body.status !== 'open') return res.status(409).json({ error: 'CART_NOT_OPEN', message: 'Cart is already checked out' });
@@ -35,20 +37,7 @@ const checkout = async (req, res) => {
       resolvedCartId = cartId;
     }
 
-    // STEP 3 — fetch live prices & validate stock
-    const productCache = new Map();
-    for (const sc of subCarts) {
-      for (const item of sc.items) {
-        if (productCache.has(item.productId)) continue;
-        const { ok, status, body } = await shopsClient.getProduct(item.productId);
-        if (status === 404 || !body.isActive) return res.status(422).json({ error: 'PRODUCT_OUT_OF_STOCK', message: `Product ${item.productId} is unavailable`, productId: item.productId });
-        if (!ok) return res.status(502).json({ error: 'SHOPS_SERVICE_ERROR' });
-        if (body.stock < item.quantity) return res.status(422).json({ error: 'PRODUCT_OUT_OF_STOCK', message: `Insufficient stock for product ${item.productId}`, productId: item.productId });
-        productCache.set(item.productId, body);
-      }
-    }
-
-    // STEP 4 — resolve delivery address & destination hub
+    // STEP 3 — resolve delivery address & destination hub
     const address = await DeliveryAddress.findOne({ where: { id: addressId, customerId } });
     if (!address) return res.status(404).json({ error: 'ADDRESS_NOT_FOUND' });
 
@@ -56,7 +45,7 @@ const checkout = async (req, res) => {
     const destHub = await Center.findOne({ where: { cityId: destinationCityId, type: 'main' } });
     if (!destHub) return res.status(422).json({ error: 'NO_DELIVERY_COVERAGE', message: 'No main center for destination city' });
 
-    // STEP 5 — resolve origin hubs & calculate totals
+    // STEP 4 — resolve origin hubs & calculate totals using prices returned by step 2
     const subCartData = [];
     let totalAmount = 0;
 
@@ -65,48 +54,30 @@ const checkout = async (req, res) => {
       if (!originHub) return res.status(422).json({ error: 'NO_HUB_FOR_SHOP_CITY', message: `Shop city ${sc.shopCityId} has no main center` });
 
       let subtotal = 0;
-      const itemsWithPrice = sc.items.map(item => {
-        const product = productCache.get(item.productId);
-        const lineTotal = parseFloat(product.currentPrice) * item.quantity;
-        subtotal += lineTotal;
-        return { ...item, unitPrice: parseFloat(product.currentPrice) };
-      });
-
+      for (const item of sc.items) {
+        subtotal += parseFloat(item.unitPrice) * item.quantity;
+      }
       subtotal = parseFloat(subtotal.toFixed(4));
       totalAmount += subtotal;
-      subCartData.push({ subCart: sc, originHubId: originHub.id, subtotal, itemsWithPrice });
+      subCartData.push({ subCart: sc, originHubId: originHub.id, subtotal });
     }
 
     totalAmount = parseFloat(totalAmount.toFixed(4));
 
-    // STEP 6 — get customer wallet
-    const accountRes = await financialClient.getAccountByUser(customerId, 'SYP');
-    if (accountRes.status === 404) return res.status(400).json({ error: 'INSUFFICIENT_BALANCE', message: 'No SYP wallet found' });
-    if (!accountRes.ok) return res.status(502).json({ error: 'FINANCIAL_SERVICE_ERROR' });
-    const customerAccountSN = accountRes.body.accountSN;
+    // STEP 5 — check balance and create all holds atomically in one financial call
+    const holdsPayload = subCartData.map(({ subtotal }) => ({
+      amount: subtotal.toFixed(4),
+      reference: 'pending-checkout'
+    }));
 
-    // STEP 7 — check available balance
-    const balanceRes = await financialClient.getAvailableBalance(customerAccountSN);
-    if (!balanceRes.ok) return res.status(502).json({ error: 'FINANCIAL_SERVICE_ERROR' });
-    if (parseFloat(balanceRes.body.availableBalance) < totalAmount) {
-      return res.status(400).json({ error: 'INSUFFICIENT_BALANCE', message: 'Available balance is less than order total' });
-    }
+    const holdsRes = await financialClient.createHoldsBatch(customerId, 'SYP', holdsPayload);
+    if (holdsRes.status === 404) return res.status(400).json({ error: 'INSUFFICIENT_BALANCE', message: 'No SYP wallet found' });
+    if (holdsRes.status === 400) return res.status(400).json({ error: 'INSUFFICIENT_BALANCE', message: holdsRes.body.message || 'Available balance is less than order total' });
+    if (!holdsRes.ok) return res.status(502).json({ error: 'FINANCIAL_SERVICE_ERROR' });
 
-    // STEP 8 — create holds (before any DB writes to tree-orders)
-    const createdHolds = [];
-    for (const { subCart, subtotal } of subCartData) {
-      const holdRes = await financialClient.createHold(customerAccountSN, subtotal, 'pending-checkout');
-      if (!holdRes.ok) {
-        // release all holds created so far in reverse
-        for (const h of createdHolds.reverse()) {
-          await financialClient.releaseHold(h.holdId).catch(() => {});
-        }
-        return res.status(500).json({ error: 'CHECKOUT_HOLD_FAILED', message: 'Payment reservation failed; no charge made' });
-      }
-      createdHolds.push({ subCartId: subCart.id, holdId: holdRes.body.holdId });
-    }
+    const holdIds = holdsRes.body.holdIds;
 
-    // STEP 9 — create order
+    // STEP 6 — create order
     const order = await Order.create({
       customerId,
       cartId: resolvedCartId,
@@ -117,11 +88,11 @@ const checkout = async (req, res) => {
       totalAmount
     });
 
-    // STEP 10 — create suborders + items + logs + update hold references
+    // STEP 7 — create suborders + items + logs + update hold references
     const createdSubOrders = [];
     for (let i = 0; i < subCartData.length; i++) {
-      const { subCart, originHubId, subtotal, itemsWithPrice } = subCartData[i];
-      const { holdId } = createdHolds[i];
+      const { subCart, originHubId, subtotal } = subCartData[i];
+      const holdId = holdIds[i];
 
       const subOrder = await SubOrder.create({
         orderId: order.id,
@@ -135,7 +106,7 @@ const checkout = async (req, res) => {
       });
 
       await SubOrderItem.bulkCreate(
-        itemsWithPrice.map(item => ({
+        subCart.items.map(item => ({
           subOrderId: subOrder.id,
           productId: item.productId,
           variantId: item.variantId || null,
@@ -152,23 +123,21 @@ const checkout = async (req, res) => {
         changedByRole: 'system'
       });
 
-      // update hold reference to tie it to this suborder
       await financialClient.updateHoldReference(holdId, `suborder-${subOrder.id}`).catch(() => {});
 
       const items = await SubOrderItem.findAll({ where: { subOrderId: subOrder.id } });
       createdSubOrders.push({ ...subOrder.toJSON(), items: items.map(i => i.toJSON()) });
     }
 
-    // STEP 11 — mark subcarts as checked out in tree-shops
+    // STEP 8 — mark subcarts as checked out in tree-shops
     for (const { subCart } of subCartData) {
       const checkoutRes = await shopsClient.checkoutSubCart(subCart.id).catch(() => null);
-      // partial checkout: subcart was moved to a new isolated cart — update order reference
       if (checkoutRes?.ok && checkoutRes.body?.cartId && checkoutRes.body.cartId !== resolvedCartId) {
         await order.update({ cartId: checkoutRes.body.cartId }).catch(() => {});
       }
     }
 
-    // STEP 12 — respond
+    // STEP 9 — respond
     return res.status(201).json({
       order: {
         id: order.id,

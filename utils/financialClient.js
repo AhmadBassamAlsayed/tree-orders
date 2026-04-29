@@ -30,6 +30,12 @@ const getAccountByUser = (userId, currency) =>
 const getAvailableBalance = (accountSN) =>
   internalFetch(`/api/internal/accounts/${encodeURIComponent(accountSN)}/available-balance`);
 
+const createHoldsBatch = (userId, currency, holds) =>
+  internalFetch('/api/internal/holds/batch', {
+    method: 'POST',
+    body: JSON.stringify({ userId, currency, holds })
+  });
+
 const createHold = (accountSN, amount, reference) =>
   internalFetch('/api/internal/holds', {
     method: 'POST',
@@ -51,4 +57,4 @@ const captureHold = (holdId, shopAccountSN) =>
     body: JSON.stringify({ shopAccountSN })
   });
 
-module.exports = { getAccountByUser, getAvailableBalance, createHold, updateHoldReference, releaseHold, captureHold };
+module.exports = { getAccountByUser, getAvailableBalance, createHoldsBatch, createHold, updateHoldReference, releaseHold, captureHold };
