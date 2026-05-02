@@ -123,7 +123,9 @@ const checkout = async (req, res) => {
         changedByRole: 'system'
       });
 
-      await financialClient.updateHoldReference(holdId, `suborder-${subOrder.id}`).catch(() => {});
+      await financialClient.updateHoldReference(holdId, `suborder-${subOrder.id}`).catch((err) => {
+  console.error('Failed to update hold reference', { holdId, err });
+});
 
       const items = await SubOrderItem.findAll({ where: { subOrderId: subOrder.id } });
       createdSubOrders.push({ ...subOrder.toJSON(), items: items.map(i => i.toJSON()) });
