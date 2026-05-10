@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const internalAuth = require('../middlewares/internalAuth');
 const internalController = require('../controllers/internalController');
+const internalGroupPurchaseController = require('../controllers/internalGroupPurchaseController');
 
 router.use(internalAuth);
 
@@ -99,6 +100,8 @@ router.use(internalAuth);
  *               error: "INTERNAL_ERROR"
  *               message: "Unexpected database error"
  */
+router.post('/group-purchase/orders', internalGroupPurchaseController.createGroupPurchaseOrders);
+
 router.get('/orders/:id',    internalController.getOrder);
 
 /**

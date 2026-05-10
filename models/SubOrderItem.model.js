@@ -7,7 +7,8 @@ const SubOrderItem = sequelize.define('SubOrderItem', {
   productId: { type: DataTypes.BIGINT.UNSIGNED, allowNull: false, field: 'product_id' },
   variantId: { type: DataTypes.BIGINT.UNSIGNED, allowNull: true, field: 'variant_id' },
   quantity: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
-  unitPrice: { type: DataTypes.DECIMAL(20, 4), allowNull: false, field: 'unit_price' }
+  unitPrice: { type: DataTypes.DECIMAL(20, 4), allowNull: false, field: 'unit_price' },
+  groupPurchaseId: { type: DataTypes.BIGINT.UNSIGNED, allowNull: true, field: 'group_purchase_id' }
 }, {
   tableName: 'sub_order_items',
   timestamps: false,

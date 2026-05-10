@@ -1,3 +1,4 @@
+const GroupPurchaseOrder = require('./GroupPurchaseOrder.model');
 const City = require('./City.model');
 const Center = require('./Center.model');
 const CenterAssignment = require('./CenterAssignment.model');
@@ -43,5 +44,6 @@ SubOrderStatusLog.belongsTo(SubOrder, { foreignKey: 'subOrderId', as: 'subOrder'
 
 module.exports = {
   City, Center, CenterAssignment, DeliveryAddress,
-  Order, SubOrder, SubOrderItem, SubOrderStatusLog
+  Order, SubOrder, SubOrderItem, SubOrderStatusLog,
+  GroupPurchaseOrder
 };
