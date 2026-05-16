@@ -42,4 +42,19 @@ const getOpenSubCartByShop = (userId, shopId) =>
 const checkoutSubCart = (subCartId) =>
   internalFetch(`/api/internal/sub-carts/${subCartId}/checkout`, { method: 'PATCH' });
 
-module.exports = { getCart, getSubCart, getOpenSubCartByShop, getProduct, getShop, checkoutSubCart };
+const getComboOffer = (comboOfferId) =>
+  internalFetch(`/api/internal/combo-offers/${comboOfferId}`);
+
+const purchaseCombo = (comboOfferId, quantity) =>
+  internalFetch(`/api/internal/combo-offers/${comboOfferId}/purchase`, {
+    method: 'POST',
+    body: JSON.stringify({ quantity })
+  });
+
+const refundCombo = (comboOfferId, quantity) =>
+  internalFetch(`/api/internal/combo-offers/${comboOfferId}/refund`, {
+    method: 'POST',
+    body: JSON.stringify({ quantity })
+  });
+
+module.exports = { getCart, getSubCart, getOpenSubCartByShop, getProduct, getShop, checkoutSubCart, getComboOffer, purchaseCombo, refundCombo };

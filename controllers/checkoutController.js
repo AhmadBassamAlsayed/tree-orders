@@ -12,8 +12,11 @@ const checkout = async (req, res) => {
     return res.status(400).json({ error: 'MISSING_CHECKOUT_TARGET', message: 'Provide either cartId or shopId, not both' });
   }
 
+  // Track purchased combos so we can refund on failure
+  const purchasedCombos = [];
+
   try {
-    // STEP 2 — load subcart(s); internal endpoint validates products/categories/shops in 3 queries
+    // STEP 2 — load subcart(s)
     let subCarts = [];
     let resolvedCartId;
 
@@ -45,13 +48,43 @@ const checkout = async (req, res) => {
     const destHub = await Center.findOne({ where: { cityId: destinationCityId, type: 'main' } });
     if (!destHub) return res.status(422).json({ error: 'NO_DELIVERY_COVERAGE', message: 'No main center for destination city' });
 
-    // STEP 4 — resolve origin hubs & calculate totals using prices returned by step 2
+    // STEP 4 — atomically purchase all COMBO items (FOR UPDATE lock in tree-shops)
+    // This must happen before financial holds so we can refund combos if anything fails.
+    for (const sc of subCarts) {
+      for (const item of (sc.items || [])) {
+        if (item.type !== 'COMBO') continue;
+
+        const purchaseRes = await shopsClient.purchaseCombo(item.comboOfferId, item.quantity);
+
+        if (purchaseRes.status === 404) {
+          await rollbackCombos(purchasedCombos);
+          return res.status(422).json({ error: 'COMBO_NOT_FOUND', comboOfferId: item.comboOfferId });
+        }
+        if (purchaseRes.status === 409) {
+          await rollbackCombos(purchasedCombos);
+          return res.status(409).json({ error: purchaseRes.body.error || 'COMBO_UNAVAILABLE', comboOfferId: item.comboOfferId, message: purchaseRes.body.message });
+        }
+        if (!purchaseRes.ok) {
+          await rollbackCombos(purchasedCombos);
+          return res.status(502).json({ error: 'SHOPS_SERVICE_ERROR' });
+        }
+
+        // Store snapshot for order creation and for rollback if needed
+        purchasedCombos.push({ comboOfferId: item.comboOfferId, quantity: item.quantity, snapshot: purchaseRes.body.snapshot });
+        item._snapshot = purchaseRes.body.snapshot;
+      }
+    }
+
+    // STEP 5 — resolve origin hubs & calculate totals
     const subCartData = [];
     let totalAmount = 0;
 
     for (const sc of subCarts) {
       const originHub = await Center.findOne({ where: { cityId: sc.shopCityId, type: 'main' } });
-      if (!originHub) return res.status(422).json({ error: 'NO_HUB_FOR_SHOP_CITY', message: `Shop city ${sc.shopCityId} has no main center` });
+      if (!originHub) {
+        await rollbackCombos(purchasedCombos);
+        return res.status(422).json({ error: 'NO_HUB_FOR_SHOP_CITY', message: `Shop city ${sc.shopCityId} has no main center` });
+      }
 
       let subtotal = 0;
       for (const item of sc.items) {
@@ -64,20 +97,29 @@ const checkout = async (req, res) => {
 
     totalAmount = parseFloat(totalAmount.toFixed(4));
 
-    // STEP 5 — check balance and create all holds atomically in one financial call
+    // STEP 6 — check balance and create all holds atomically
     const holdsPayload = subCartData.map(({ subtotal }) => ({
       amount: subtotal.toFixed(4),
       reference: 'pending-checkout'
     }));
 
     const holdsRes = await financialClient.createHoldsBatch(customerId, 'SYP', holdsPayload);
-    if (holdsRes.status === 404) return res.status(400).json({ error: 'INSUFFICIENT_BALANCE', message: 'No SYP wallet found' });
-    if (holdsRes.status === 400) return res.status(400).json({ error: 'INSUFFICIENT_BALANCE', message: holdsRes.body.message || 'Available balance is less than order total' });
-    if (!holdsRes.ok) return res.status(502).json({ error: 'FINANCIAL_SERVICE_ERROR' });
+    if (holdsRes.status === 404) {
+      await rollbackCombos(purchasedCombos);
+      return res.status(400).json({ error: 'INSUFFICIENT_BALANCE', message: 'No SYP wallet found' });
+    }
+    if (holdsRes.status === 400) {
+      await rollbackCombos(purchasedCombos);
+      return res.status(400).json({ error: 'INSUFFICIENT_BALANCE', message: holdsRes.body.message || 'Available balance is less than order total' });
+    }
+    if (!holdsRes.ok) {
+      await rollbackCombos(purchasedCombos);
+      return res.status(502).json({ error: 'FINANCIAL_SERVICE_ERROR' });
+    }
 
     const holdIds = holdsRes.body.holdIds;
 
-    // STEP 6 — create order
+    // STEP 7 — create order + suborders + items
     const order = await Order.create({
       customerId,
       cartId: resolvedCartId,
@@ -88,7 +130,6 @@ const checkout = async (req, res) => {
       totalAmount
     });
 
-    // STEP 7 — create suborders + items + logs + update hold references
     const createdSubOrders = [];
     for (let i = 0; i < subCartData.length; i++) {
       const { subCart, originHubId, subtotal } = subCartData[i];
@@ -106,13 +147,30 @@ const checkout = async (req, res) => {
       });
 
       await SubOrderItem.bulkCreate(
-        subCart.items.map(item => ({
-          subOrderId: subOrder.id,
-          productId: item.productId,
-          variantId: item.variantId || null,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice
-        }))
+        subCart.items.map(item => {
+          if (item.type === 'COMBO') {
+            const snapshot = item._snapshot;
+            return {
+              subOrderId: subOrder.id,
+              type: 'COMBO',
+              comboOfferId: item.comboOfferId,
+              productId: null,
+              variantId: null,
+              titleSnapshot: snapshot?.title || null,
+              productsSnapshot: snapshot?.products || null,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice
+            };
+          }
+          return {
+            subOrderId: subOrder.id,
+            type: 'PRODUCT',
+            productId: item.productId,
+            variantId: item.variantId || null,
+            quantity: item.quantity,
+            unitPrice: item.unitPrice
+          };
+        })
       );
 
       await SubOrderStatusLog.create({
@@ -124,8 +182,8 @@ const checkout = async (req, res) => {
       });
 
       await financialClient.updateHoldReference(holdId, `suborder-${subOrder.id}`).catch((err) => {
-  console.error('Failed to update hold reference', { holdId, err });
-});
+        console.error('Failed to update hold reference', { holdId, err });
+      });
 
       const items = await SubOrderItem.findAll({ where: { subOrderId: subOrder.id } });
       createdSubOrders.push({ ...subOrder.toJSON(), items: items.map(i => i.toJSON()) });
@@ -152,18 +210,39 @@ const checkout = async (req, res) => {
           shopId: so.shopId,
           status: so.status,
           totalAmount: so.totalAmount,
-          items: so.items.map(i => ({
-            productId: i.productId,
-            variantId: i.variantId,
-            quantity: i.quantity,
-            unitPrice: i.unitPrice
-          }))
+          items: so.items.map(i => {
+            if (i.type === 'COMBO') {
+              return {
+                type: 'COMBO',
+                comboOfferId: i.comboOfferId,
+                titleSnapshot: i.titleSnapshot,
+                quantity: i.quantity,
+                unitPrice: i.unitPrice
+              };
+            }
+            return {
+              type: 'PRODUCT',
+              productId: i.productId,
+              variantId: i.variantId,
+              quantity: i.quantity,
+              unitPrice: i.unitPrice
+            };
+          })
         }))
       }
     });
   } catch (err) {
+    await rollbackCombos(purchasedCombos);
     console.error('checkout error:', err);
     return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
+  }
+};
+
+const rollbackCombos = async (purchasedCombos) => {
+  for (const { comboOfferId, quantity } of purchasedCombos) {
+    await shopsClient.refundCombo(comboOfferId, quantity).catch((err) => {
+      console.error('Failed to refund combo on rollback', { comboOfferId, err });
+    });
   }
 };
 
